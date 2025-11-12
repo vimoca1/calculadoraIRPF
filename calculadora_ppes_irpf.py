@@ -1,8 +1,12 @@
-
 import streamlit as st
 from typing import List, Tuple, Dict, Optional
 
 st.set_page_config(page_title="Calculadora IRPF + PPES · CCAA 2025", page_icon="💶", layout="wide")
+
+# ======================================================
+# ESCALAS 2025 (Régimen común) — (según documento del usuario)
+# Formato: lista de (límite_superior, tipo %) con None como "sin límite"
+# ======================================================
 
 STATE_2025: List[Tuple[Optional[float], float]] = [
     (12450, 9.5),
@@ -84,6 +88,9 @@ CCAA_AUTON_2025: Dict[str, List[Tuple[Optional[float], float]]] = {
 
 CCAA_LIST = sorted(CCAA_AUTON_2025.keys())
 
+# ======================================================
+# MÍNIMOS PERSONALES Y FAMILIARES (base estatal + ajustes CCAA)
+# ======================================================
 MIN_EST = {
     "personal": {"base": 5550, "mas65": 1150, "mas75": 1400},
     "desc": {"primero": 2400, "segundo": 2700, "tercero": 4000, "cuarto_y_sig": 4500, "menor3": 2800},
@@ -133,6 +140,9 @@ MIN_AUTON = {
     }
 }
 
+# ======================================================
+# Funciones de cálculo
+# ======================================================
 def get_minimos(ccaa: str):
     cfg = MIN_AUTON.get(ccaa, "estatales")
     if cfg == "estatales":
@@ -205,8 +215,9 @@ def fv_aportaciones_anuales(aporte_anual: float, n: int, r: float) -> float:
         return aporte_anual * n
     return aporte_anual * (((1 + r) ** n - 1) / r)
 
+# ================= UI ==================
 st.title("💶 Calculadora de ahorro IRPF por aportación a PPES (España)")
-st.caption("Escalas estatal y autonómicas (régimen común) 2025 + mínimos personales/familiares. Proyección de inversión hasta los 67 (5%/7%).")
+st.caption("Escalas estatal y autonómicas (régimen común) 2025 + mínimos personales/familiares. Proyección (5%/7%) y ahorro acumulado hasta los 67.")
 
 left, right = st.columns([0.62, 0.38])
 
@@ -214,10 +225,23 @@ with left:
     st.subheader("Datos del contribuyente")
     situacion = st.selectbox("Situación laboral", ["Autónomo", "Autónomo + Asalariado"])
     ccaa = st.selectbox("Comunidad Autónoma de residencia", CCAA_LIST, index=CCAA_LIST.index("Comunidad de Madrid") if "Comunidad de Madrid" in CCAA_LIST else 0)
-    declaracion = st.radio("Tipo de declaración", ["Individual", "Conjunta"], horizontal=True)
     edad = st.number_input("Edad", min_value=18, max_value=100, value=35, step=1)
     base_imponible = st.number_input("Base imponible general (todas tus rentas netas) €", min_value=0.0, value=45000.0, step=100.0, format="%.2f")
-    aportacion = st.number_input("Aportación anual a PPES (€)", min_value=0.0, value=3000.0, step=100.0, format="%.2f")
+
+    # Límite dinámico de aportación: min(5.750; 30% de BIG)
+    max_aporte = min(5750.0, 0.30 * float(base_imponible))
+    if max_aporte < 0:
+        max_aporte = 0.0
+    aporte_default = min(3000.0, max_aporte)
+    aportacion = st.number_input(
+        "Aportación anual a PPES (€)",
+        min_value=0.0,
+        max_value=float(max_aporte),
+        value=float(aporte_default),
+        step=100.0,
+        format="%.2f",
+        help="Este campo está limitado automáticamente a min(5.750 €, 30% de tu base imponible general)."
+    )
 
     st.markdown("**Mínimos personales y familiares**")
     c1, c2 = st.columns(2)
@@ -232,9 +256,11 @@ with left:
         disc_fam_65 = st.number_input("Familiares con discapacidad ≥65%", min_value=0, max_value=10, value=0, step=1)
         ayuda = st.checkbox("Necesita ayuda de terceras personas / movilidad reducida (cuando proceda)", value=False)
 
+    # Mínimos y bases
     M = minimo_total(ccaa, int(edad), int(hijos), int(menores3), int(asc65), int(asc75),
                      disc_contrib, int(disc_fam_33), int(disc_fam_65), ayuda)
 
+    # Tope fiscal (redundante con la UI, pero válido por seguridad)
     tope_ppes = min(aportacion, 5750.0, 0.30 * base_imponible)
 
     BLG_sin = max(0.0, base_imponible)
@@ -245,30 +271,34 @@ with left:
 
     cuota_sin = cuota_total(base_tarifa_sin, ccaa)
     cuota_con = cuota_total(base_tarifa_con, ccaa)
-    ahorro = max(0.0, cuota_sin - cuota_con)
+    ahorro_anual = max(0.0, cuota_sin - cuota_con)
 
+    # Proyección inversión y ahorro acumulado IRPF
     n_years = anos_hasta_67(int(edad))
     r = tasa_asumida(int(edad))
     capital_jubilacion = fv_aportaciones_anuales(aportacion, n_years, r)
+
+    ahorro_acumulado = ahorro_anual * n_years
 
 with right:
     st.subheader("Resultado (año actual)")
     st.metric("Tope fiscal PPES aplicable", f"{tope_ppes:,.2f} €")
     st.metric("Mínimos aplicados", f"{M:,.2f} €")
-    st.metric("Base sujeta a tarifa (antes)", f"{base_tarifa_sin:,.2f} €")
-    st.metric("Base sujeta a tarifa (después)", f"{base_tarifa_con:,.2f} €")
-    st.metric("Ahorro IRPF estimado (año)", f"{ahorro:,.2f} €")
+    st.metric("Base sujeta a IRPF (antes)", f"{base_tarifa_sin:,.2f} €")
+    st.metric("Base sujeta a IRPF (después)", f"{base_tarifa_con:,.2f} €")
+    st.metric("Ahorro IRPF estimado (año)", f"{ahorro_anual:,.2f} €")
 
     st.divider()
     st.subheader("Proyección a jubilación (67 años)")
     st.metric("Años hasta 67", f"{n_years} años")
     st.metric("Rentabilidad asumida", f"{r*100:.2f}% anual")
     st.metric("Capital estimado a los 67", f"{capital_jubilacion:,.2f} €")
-    st.caption("FV de aportación anual constante (no descuenta inflación ni variación salarial).")
+    st.metric("Ahorro IRPF acumulado hasta los 67", f"{ahorro_acumulado:,.2f} €")
+    st.caption("El ahorro acumulado supone repetir cada año la misma aportación, BIG y situación familiar.")
 
 st.divider()
 with st.expander("Ver escalas usadas (2025)"):
     st.write("**Estatal (común)**:", STATE_2025)
     st.write(f"**Autonómica - {ccaa}**:", CCAA_AUTON_2025.get(ccaa))
 
-st.caption("Cálculo orientativo. La liquidación real puede variar por deducciones específicas, familia numerosa, vivienda, etc.")
+st.caption("Cálculo orientativo. La liquidación real puede variar por deducciones específicas, familia numerosa, vivienda, cambios normativos, etc.")
